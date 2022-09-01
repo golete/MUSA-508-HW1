@@ -1,0 +1,520 @@
+---
+title: "LA Metro Rail Expansion: A Brief Analysis on the Impact of Transit"
+author: "Adrián León"
+date: "9/21/2021"
+output: html_document
+  html_document: 
+    toc: true
+    toc_float: true
+    code_folding: hide
+#    theme: flatly
+---
+
+
+```{r setup, include=FALSE}
+
+# R Markdown options
+knitr::opts_chunk$set(echo = T, warning = F, error = F, message = F, results = F, cache=T, cache.lazy = F)
+
+# Packages
+library(ggmap)
+library(ggplot2)
+library(gridExtra)
+library(kableExtra)
+library(knitr)
+library(mapview)
+library(sf)
+library(tidycensus)
+library(tidyverse)
+library(tigris)
+
+# Options
+options(scipen=999)
+options(tigris_class = "sf")
+
+# Sources
+root.dir = "https://raw.githbusercontent.com/urbanSpatial/Public-Policy-Analytics-Landing/master/DATA/"
+source("https://raw.githubusercontent.com/urbanSpatial/Public-Policy-Analytics-Landing/master/functions.r")
+
+# Credentials
+census_api_key("c2bdb8d298b60ec0cb50b561a2f8df61e92f6b39")
+
+# Function shortcuts
+g <- glimpse
+m <- mapview
+len <- length
+st_c <- st_coordinates
+
+# Aesthetic options
+colors <- 
+  c('#222222',
+    '#eeeeee',
+    '#676767')
+
+palette5 <-
+  c("#f0f9e8",
+    "#bae4bc",
+    "#7bccc4",
+    "#139ed1",
+    "#0868ac")
+
+# ggplot map theme for us to build on
+plaTheme <- 
+  function() {
+    theme(
+      axis.text.x = element_blank(),
+      legend.position = c(0.85, 0.15),
+      legend.background = element_rect(fill = colors[2]),
+      legend.text = element_text(size=8),
+      legend.key.size = unit(1,"line"),
+      legend.key = element_rect(fill = NA),
+      panel.border = element_blank(),
+      panel.background = element_rect(fill = colors[2]),
+      panel.grid.major = element_blank(),
+      plot.title = element_text(size = 20, face = "bold"),
+      plot.subtitle = element_text(color = colors[1], face = "plain")
+    )
+  }
+
+# projection Settings
+# 102645 is the NAD 83 projection in ft for California V Zone, which includes LA County.
+socalCRS <- 'ESRI:102645'
+
+
+# other functions
+qBr <- function(df, variable, rnd) {
+  if (missing(rnd)) {
+    as.character(quantile(round(df[[variable]],2),
+                          c(.01,.2,.4,.6,.8), na.rm=T))
+    } else if (rnd == FALSE | rnd == F) {
+      as.character(formatC(quantile(df[[variable]],
+                                    c(.01,.2,.4,.6,.8), na.rm=T), digits = 3))
+    }
+}
+
+```
+
+
+# 0. Introduction
+
+Los Angeles Metro Rail is not only one of the newest and expansive rail systems of the US metropolis, it is also the fastest growing at present time. With the goal of modernizing the city for the 2028 Summer Olympics, the City must not only focus on the expansion projects, but also must evaluate the impact that the current layout has in the lives of Angelenos, and avoid committing similar mistakes as in the [past]("https://investinginplace.org/2019/04/02/how-we-got-here/").
+
+For this, we are going to look at Housing, Demographic and Mobility variables from the American Community Survey, as well as Crime statistics from the City of LA. This analysis is not only spatial. We compare the data from 2009 to that of 2019, in order to see how far the city has evolved in the last 10 years.
+
+
+# 1. Data Collection
+
+This analysis is framed on the concept of [Transit Oriented Development]("https://www.transit.dot.gov/TOD") as defined by the Federal Transit Administration. This is why, the variables used in this particular analysis relate to both Housing (and its aging) and transportation modes by household.
+
+The variables of interest are: percentage of house ownership, household construction age, percentage of household with less than two cars and percentage of Hispanic or Latino population, which became the [largest demographic group in California, precisely in 2019]("https://www.ppic.org/publication/californias-population/").
+
+
+
+```{r demographic data}
+
+
+# set FIPS data
+state <- 6
+county <- 37
+
+
+# ACS Data
+# Set the ACS variables to be queried from both the ACS 2009 and 2019.
+
+vars <-
+  c("B25026_001E", #      Total population in occupied housing units
+    "B25001_001E", #      Total housing units
+    "B25058_001E", #      Median contract rent (dollars)
+    "B25003_002E", #      Owner-occupied house
+    "B25035_001E", #      Median year struture built
+    "B25046_001E", #      Aggregate number of vehicles available
+    "B08141_002E", #      Houses without cars
+    "B08141_003E", #      Houses with 1 car
+    "B19013_001E", #      Median household income
+    "B25003I_001") #      Number of hispanic or latino residents
+
+
+# Get tract data function
+getACS <- 
+  function(year, vars) {
+    get_acs(
+    geography = "tract",
+    variables = vars,
+    year = year,
+    state = state,
+    county = county,
+    geometry = T,
+    output = "wide") %>%
+  st_transform(st_crs(socalCRS)) %>%
+  rename(
+    totalPop = B25026_001E,
+    totalHHs = B25001_001E,
+    medHHRent = B25058_001E,
+    houseOwner = B25003_002E,
+    yearBuilt = B25035_001E,
+    numVehicles = B25046_001E,
+    vehicleHH0 = B08141_002E,
+    vehicleHH1 = B08141_003E,
+    medHHInc = B19013_001E,
+    latinAms = B25003I_001E) %>%
+  dplyr::select(-NAME, -starts_with("B")) %>%
+  mutate(
+    year = year,
+    pctHHOwners = ifelse(totalHHs > 0, houseOwner/totalHHs, 0),
+    medHouseAge = ifelse(yearBuilt != 0, year - yearBuilt, NA), # year of survey minus year of construction to get structure age
+    pctHHlt2Cars = ifelse(totalHHs > 0, ((vehicleHH0 + vehicleHH1) / totalHHs), 0), # Sum households with 0 or 1 car between total households
+    vehiclesHH = ifelse(totalHHs > 0, numVehicles/totalHHs, 0),
+    pctLatAms = ifelse(totalPop > 0, latinAms/totalPop, 0)
+    ) %>%
+  dplyr::select(-houseOwner, -yearBuilt, -vehicleHH0, -vehicleHH1, -numVehicles, -latinAms, -medHHInc)
+}
+
+
+# get ACS data for 2009 and 2019
+tracts09 <- getACS(2009, vars)
+tracts19 <- getACS(2019, vars)
+
+
+# Both years are combined
+allTracts <-
+  rbind(tracts09,
+        tracts19)
+
+# Eliminate Santa Catalina and San Clemente Islands Census tracts
+allTracts <- allTracts[!(allTracts$GEOID == '06037599000' | allTracts$GEOID == '06037599100'),]
+
+
+```
+
+
+
+```{r transit data}
+
+# LA Metro Rail stops
+# SOURCE: https://developer.metro.net/gis-data/
+
+metroStops <- 
+  st_read("./data/Stations_All_0316/Stations_All_0316.shp") %>%
+  dplyr::select(LINENUM, STATION) %>%
+  st_transform(st_crs(socalCRS))
+
+
+```
+
+
+---
+
+# 2. LA Metro Transit Oriented Development
+
+The first step in this analysis, was to locate the LA Metro rail stops and trace a 1/2 mile radius around them, which corresponds to a given "walkable" threshold that most people are willing to undertake to access [rail transit]("https://www.researchgate.net/publication/259635687_New_evidence_on_walking_distances_to_transit_stops_Identifying_redundancies_and_gaps_using_variable_service_areas").
+
+
+
+```{r TOD buffers}
+
+# Create half-mile buffers from each METRO stop, the usual max distance (IN a city like LA) most people are willing to walk to access transit.
+# CRS units are in feet, and 1/2 mile is 2640 feet.
+
+metroBuffers <-
+  st_buffer(metroStops, 2640) %>%
+  st_union %>%
+  st_sf()
+
+
+```
+
+
+Based on the previous *walkability* threshold, we can separate the city into two realms. Those census tracts in areas that are served by LA Metro rail transit, and those that are not.
+
+
+```{r TOD tracts}
+
+# selectCentroids is the preferred method available to spatially subset data around transit stops.
+# If the centroid of a Census tract falls into the 1/2 mile buffer around each stop, this tract as a whole
+# is designated as 'TOD', otherwise is 'Non-TOD'.
+
+todTracts <-
+  rbind(
+    st_centroid(allTracts)[metroBuffers,] %>%                           # select all census whose centroids falls in TOD buffers
+      mutate(TOD = 1),
+    st_centroid(allTracts)[metroBuffers, op = st_disjoint] %>%          # select all census whose centroids don't fall in TOD buffers
+      mutate(TOD = 0)) %>%                                              # st_disjoint takes two geometries and returns T if they don't intersect 
+  st_sf()
+
+
+```
+
+
+
+Given this distinction, we can compare different variables not only across space (between TOD and Non-TOD zones), but also time, looking at data from 2009 and from 2019:
+
+
+
+
+```{r fig.width= 12, fig.height=8}
+
+# House ownership
+
+map <-
+  get_stamenmap(
+    bbox = c(left =-118.55, bottom = 33.650, right = -117.85, top = 34.25),
+  zoom = 11,
+  maptype = "toner-lite",
+  crop = TRUE,
+  color = "bw",
+  force = FALSE)
+
+
+LAmap <- ggmap(map, extent = "panel")
+
+
+mapVariable <- function(varyear, varname, variable) {
+  todTractsYr <-
+    todTracts %>%
+    filter(year == varyear) %>%
+    st_drop_geometry() %>%
+    left_join(dplyr::select(allTracts %>% filter(year == varyear), GEOID)) %>%
+    st_sf()
+  
+  
+  LAmap +
+    geom_sf(data = todTractsYr, aes(fill = q5(todTractsYr[[varname]])), color = NA, inherit.aes = FALSE, alpha = .5) +
+    geom_sf(data = todTractsYr %>%
+              filter(TOD == 1) %>%
+              st_union(),
+            inherit.aes = FALSE,
+            color = "#fca503",
+            fill = "transparent",
+            size = 1) +
+    geom_sf(data = metroStops, color = "black", inherit.aes = FALSE) +
+    coord_sf(crs = st_crs(4326)) +
+    scale_fill_manual(
+      values = palette5,
+      labels = qBr(todTractsYr, varname),
+      name = paste0(variable, "\n(Percentage)")) +
+    # facet_wrap(~ TOD, ncol = 2) +
+    labs(title = paste0(variable, " in ", varyear),
+         subtitle = "Los Angeles County, Transit Oriented Development Census Tracts") +
+    plaTheme() +
+    theme(
+      axis.title = element_blank(),
+      axis.text.y = element_blank(),
+      axis.ticks = element_blank()
+    )
+}
+
+mapChange <- function(year0, year1, variable, varname) {
+  grid.arrange(
+    mapVariable(year0, variable, varname),
+    mapVariable(year1, variable, varname),
+    ncol = 2)
+}
+
+mapChange(2009, 2019, "pctHHOwners", "Home Ownership")
+
+
+```
+
+
+```{r fig.width= 12, fig.height=8}
+
+mapChange(2009, 2019, "pctHHlt2Cars", "Car Ownership (less than 2)")
+
+```
+
+
+```{r fig.width= 12, fig.height=8}
+
+mapChange(2009, 2019, "medHHRent", "Median household rent")
+
+```
+
+
+```{r fig.width= 12, fig.height=8}
+
+mapChange(2009, 2019, "pctLatAms", "Latino Population")
+
+```
+
+
+
+
+These changes in time and space are synthethized in Figure 5 and Table 1 for comparison:
+
+```{r TOD summary, fig.width=12, fig.height=5}
+
+# Now we combine all the elements by grouping and summarizing them
+
+allTractsSummary <-
+  st_drop_geometry(todTracts) %>%
+  group_by(year, TOD) %>%
+  summarize(population = mean(totalPop, na.rm = T),
+            pctLatinAms = mean(pctLatAms, na.rm = T),
+            houseOwners = mean(pctHHOwners, na.rm = T),
+            houseAge = mean(medHouseAge, na.rm = T),
+            lessThan2Cars = mean(pctHHlt2Cars, na.rm=T)
+            ) %>%
+  mutate(TOD = case_when(
+    TOD == 0 ~ "Non-TOD",
+    TOD == 1 ~ "TOD"
+  ))
+
+# With this table we can easily plot comparative bar graphs between the variables across time (2009/2019) and space (TOD/Non-Tod)
+
+allTractsSummary %>%
+  gather(Variable, Value, -year, -TOD) %>%
+  ggplot(aes(factor(year), Value, fill = TOD)) +
+  geom_bar(stat = "identity", position = "dodge2", width = 1.0, label.title=element_text(size=3)) +
+  facet_wrap(~Variable, scales = "free", ncol=5) +
+  scale_fill_manual(values = c(palette5[2], palette5[4])) +
+  labs(
+    title = "Fig. 5 - Variable differences across time and space",
+    caption = "Data:2009 ACS, 2019 ACS, https://data.lacity.org/") +
+  theme(
+    axis.title = element_blank(),
+    legend.position = "bottom",
+    legend.background = element_rect(fill = colors[2]),
+    legend.title = element_blank(),
+    legend.text = element_text(size=8),
+    legend.key.size = unit(1,"line"),
+    legend.key = element_rect(fill = NA),
+    panel.border = element_blank(),
+    panel.background = element_rect(fill = colors[2]),
+    panel.grid.major = element_blank(),
+    plot.title = element_text(size = 20, face = "bold"),
+    plot.subtitle = element_text(color = colors[1], face = "plain"),
+    strip.text.x = element_text(size = 8))
+
+```
+
+
+
+As we can deduce from these graphics, house age and population do not significantly vary across TOD and Non-TOD Areas. However it is notable that House Age changes hint that there are more new constructions in TOD areas than non-TOD ones, which may be a hopeful sign.
+
+On the other hand, as is expected, the percentages of House ownership and Households with 2 or more cars are much lower around TOD areas. Additionally, the population of Latin American ascent tend to be more represented in TOD areas than the total population.
+
+
+
+```{r}
+
+# With these we can also use Kable to print a simple table summary of data from the variables chosen.
+
+allTractsSummary %>%
+  unite(yearTOD, TOD, year, sep = " / ", remove = T) %>%
+  gather(Variable, Value, -yearTOD) %>%
+  mutate(Value = round(Value, 2)) %>%
+  spread(yearTOD, Value) %>%
+  kable() %>%
+  kable_styling() %>%
+  footnote(general_title = "\n",
+           general = "Table 1: TOD v. Non-TOD Comparison\nData: 2009 ACS, 2019 ACS, developer.metro.net")
+
+```
+
+
+```{r, fig.width=8, fig.height=16}
+
+# Based on the previous data we can produce a Graduated Map Symbol that graphically scales points according to the 
+# Population or the Median Rent of the census tracts that are serviced by LA Metro.
+
+
+palette3 <- 
+  c("#ffffcc",
+    "#41b6c4",
+    "#253494")
+
+LAmap +
+  geom_sf(data = todTracts,
+          fill= "#BCBCBC",
+          color="#EEEEEE",
+          size = 0.5,
+          inherit.aes = FALSE) +
+  geom_sf(data = todTracts %>%
+            filter(TOD == 1) %>%
+            st_centroid(),
+          shape = 21,
+          color = "#000000",
+          alpha = 0.67,
+          aes(size = totalPop,
+              fill = medHHRent),
+          inherit.aes = FALSE) +
+  coord_sf(crs = st_crs(4326)) +
+  facet_wrap(~year, ncol = 1) +
+  scale_fill_gradient(
+    low = palette3[1],
+    high = palette3[3],
+    ) + 
+  scale_size_continuous(
+    range = c(1, 7),
+    breaks = c(0, 2400, 4800, 7200, 9600, 12000),
+    labels = c("0-2400", "2400-4800", "4800-7200", "7200-9600", "9600-12000", ">12000"),
+    name = "Population") +
+  labs(title = "Fig. 6 - Population and Rent in Transit-serviced areas",
+       caption = "Data:2009 ACS, 2019 ACS, https://data.lacity.org/", 
+       subtitle = "LA Metro",
+       fill = "Median Rent (USD)",
+       size = "Population") +
+  guides(size = guide_legend() +
+  plaTheme() +
+  theme(axis.title=element_blank(),
+        axis.text=element_blank(),
+        axis.ticks=element_blank(),
+        strip.background = element_rect(color = "#c5c8c6"),
+        strip.text = element_text(size = 18,
+                                  face = "bold",
+                                  hjust = 0),
+        legend.position = "bottom",
+        legend.box = "vertical",
+        legend.background = element_blank(),
+        legend.key.width = unit(2, "cm"))
+
+
+```
+
+
+
+We also visualized how rent changes as the distance from LA Metro rail stops increases:
+
+```{r fig.width=12, fig.height=6}
+
+# We produce a multiple buffer sf and spatial join it with our data frame to determine how Rent varies depending
+# on the distance from areas serviced by LA Metro.
+
+metroBufferRings <-
+  multipleRingBuffer(metroBuffers, 105600, 2640)
+# 105600 feet = 20 miles. The last buffer must be 20 miles because of the scale of LA.
+
+allTracts.rings <-
+  st_join(st_centroid(dplyr::select(todTracts, GEOID, year)),
+          metroBufferRings) %>%
+  st_drop_geometry()%>%
+  left_join(dplyr::select(todTracts, GEOID, medHHRent, year),
+            by=c("GEOID"="GEOID", "year"="year")) %>%
+  st_sf() %>%
+  mutate(distance = distance / 5280) #convert to miles
+
+# group by
+
+rentDistance <-
+  st_drop_geometry(allTracts.rings) %>%
+  group_by(year, distance) %>%
+  summarize(Rent = mean(medHHRent, na.rm = T)) %>%
+  mutate(year = factor(year))
+
+ggplot(data=rentDistance, aes(x=distance, y=Rent, group = year)) +
+  geom_point(aes(color = year), size = 2) +
+  geom_line(aes(color = year), size=1) +
+  scale_color_manual(values=c("#139ed1", "#0868ac")) +
+  labs(y= "median rent (USD)", x = "distance from LA Metro stop (miles)") +
+  labs(title = "Fig. 8 - Rent by distance from LA Metro",
+       subtitle = "Median rent as a function of distance to Metro Stations by LA County Census Tract",
+       caption = "Data:2009 ACS, 2019 ACS, https://data.lacity.org/")
+
+
+```
+
+
+
+
+
+
